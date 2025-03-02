@@ -274,6 +274,14 @@ impl KubeClient {
     }
 }
 
+impl Clone for KubeClient {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

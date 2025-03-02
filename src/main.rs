@@ -66,14 +66,14 @@ async fn run(args: Args) -> Result<()> {
     if let Some(grep) = &args.grep {
         let mut grep_filters: Vec<Box<dyn Filter>> = Vec::new();
         
-        // 检查是否包含 & 分隔符
+        // Check if it contains the & separator
         let is_and_operation = grep.contains('&');
         
-        // 根据分隔符选择分割模式
+        // Select the split mode according to the separator
         let patterns: Vec<&str> = if is_and_operation {
             grep.split('&').collect()
         } else {
-            // 默认使用逗号分隔，保持向后兼容
+            // Use comma as the separator by default to maintain backward compatibility
             grep.split(',').collect()
         };
 
@@ -90,7 +90,7 @@ async fn run(args: Args) -> Result<()> {
                         grep_filters.push(Box::new(filter));
                     }
                     Err(e) => {
-                        // 只记录详细错误，不在日志中重复输出用户将看到的错误信息
+                        // Only record detailed errors, and do not repeat the error messages that users will see in the logs
                         debug!("Failed to create grep filter for pattern '{}': {}", trimmed_pattern, e);
                         return Err(anyhow!("Invalid grep pattern: {}", trimmed_pattern));
                     }
@@ -99,7 +99,7 @@ async fn run(args: Args) -> Result<()> {
         }
         
         if !grep_filters.is_empty() {
-            // 根据分隔符决定使用 AND 还是 OR 逻辑
+            // Determine whether to use AND or OR logic according to the separator
             if is_and_operation {
                 info!("Filtering logs with ALL of the patterns: {}", grep);
                 combined_filters.push(Box::new(AndFilter::new(grep_filters)));
@@ -112,7 +112,7 @@ async fn run(args: Args) -> Result<()> {
 
     // Handle level filter
     if let Some(level) = args.level.as_ref() {
-        // 使用逗号分隔，表示 OR 逻辑
+        // Use comma as the separator, indicating OR logic
         let level_values: Vec<&str> = level.split(',').collect();
         
         let mut level_filters: Vec<Box<dyn Filter>> = Vec::new();
@@ -126,7 +126,7 @@ async fn run(args: Args) -> Result<()> {
                         level_filters.push(Box::new(filter));
                     },
                     Err(e) => {
-                        // 只记录详细错误，不在日志中重复输出用户将看到的错误信息
+                        // Only record detailed errors, and do not repeat the error messages that users will see in the logs
                         debug!("Invalid level '{}': {}", trimmed_level, e);
                         return Err(anyhow!("Invalid log level: {}", trimmed_level));
                     }
@@ -135,7 +135,7 @@ async fn run(args: Args) -> Result<()> {
         }
         
         if !level_filters.is_empty() {
-            // 始终使用 OR 逻辑组合日志级别
+            // Always use OR logic to combine log levels
             info!("Filtering logs with ANY of the levels: {}", level);
             combined_filters.push(Box::new(OrFilter::new(level_filters)));
         }
@@ -154,191 +154,159 @@ async fn run(args: Args) -> Result<()> {
     if let Some(tail_count) = args.tail {
         if args.follow {
             // Follow mode with tail parameter
-            info!(
-                "Displaying the last {} log entries and following new ones",
-                tail_count
-            );
-            run_with_tail_follow(
-                client,
-                &pods,
-                tail_count,
-                &filters,
-                &mut formatter,
-                args.follow,
-            )
-            .await
+            run_logs(client, &pods, &filters, &mut formatter, true, Some(tail_count)).await
         } else {
             // Non-follow mode with tail parameter
-            info!("Displaying the last {} log entries", tail_count);
-            run_with_tail_no_follow(client, &pods, tail_count, &filters, &mut formatter)
-                .await
+            run_logs(client, &pods, &filters, &mut formatter, false, Some(tail_count)).await
         }
     } else {
         // No tail parameter
-        run_standard(client, &pods, &filters, &mut formatter, args.follow).await
+        run_logs(client, &pods, &filters, &mut formatter, args.follow, None).await
     }
 }
 
-// Run with tail parameter in non-follow mode
-async fn run_with_tail_no_follow(
-    client: KubeClient,
-    pods: &[PodInfo],
-    tail_count: usize,
-    filters: &[Box<dyn Filter>],
-    formatter: &mut LogFormatter,
-) -> Result<()> {
-    // Create a buffer for each pod
-    let mut pod_buffers: HashMap<String, Vec<LogEntry>> = HashMap::new();
-
-    // Initialize buffers for each pod
-    for pod in pods {
-        pod_buffers.insert(pod.name.clone(), Vec::with_capacity(tail_count));
-    }
-
-    // Create log aggregator
-    let mut aggregator = LogAggregator::new();
-
-    // Add pod log streams to aggregator - use kubectl's built-in tail parameter
-    for pod in pods {
-        debug!("Adding log stream for pod {} ({})", pod.name, pod.status);
-        let log_stream = client.get_pod_logs(pod, false, Some(tail_count)).await?;
-        aggregator.add_pod_stream(pod.clone(), log_stream).await?;
-    }
-
-    // Get log stream
-    let mut log_stream = aggregator.stream();
-
-    // Collect logs for each pod
-    while let Some(entry_result) = log_stream.recv().await {
-        match entry_result {
-            Ok(entry) => {
-                // Apply filters
-                if !filters.is_empty() && !filters.iter().all(|f| f.apply(&entry)) {
-                    continue;
-                }
-
-                // Add to the appropriate pod buffer
-                if let Some(buffer) = pod_buffers.get_mut(&entry.pod_name) {
-                    buffer.push(entry);
-                }
-            }
-            Err(e) => {
-                error!("Error receiving log entry: {}", e);
-            }
-        }
-    }
-
-    // Display the buffered logs for each pod
-    for (pod_name, buffer) in pod_buffers {
-        if !buffer.is_empty() {
-            info!("Logs for pod {}:", pod_name);
-
-            // If we have more logs than tail_count, only show the last tail_count logs
-            let logs_to_display = if buffer.len() > tail_count {
-                &buffer[buffer.len() - tail_count..]
-            } else {
-                &buffer[..]
-            };
-
-            for entry in logs_to_display {
-                if let Err(e) = formatter.format_colored(entry) {
-                    error!("Failed to format log entry: {}", e);
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-// Run with tail parameter in follow mode
-async fn run_with_tail_follow(
-    client: KubeClient,
-    pods: &[PodInfo],
-    tail_count: usize,
-    filters: &[Box<dyn Filter>],
-    formatter: &mut LogFormatter,
-    follow: bool,
-) -> Result<()> {
-    // Create log aggregator
-    let mut aggregator = LogAggregator::new();
-
-    // Add pod log streams to aggregator - use kubectl's built-in tail parameter
-    for pod in pods {
-        debug!("Adding log stream for pod {} ({})", pod.name, pod.status);
-        // We'll use kubectl's --tail parameter to limit initial logs
-        let log_stream = client.get_pod_logs(pod, follow, Some(tail_count)).await?;
-        aggregator.add_pod_stream(pod.clone(), log_stream).await?;
-    }
-
-    // Get log stream
-    let mut log_stream = aggregator.stream();
-
-    // Process logs - in follow mode, we display logs as they come in
-    info!(
-        "Displaying the last {} log entries per pod and following new ones",
-        tail_count
-    );
-
-    while let Some(entry_result) = log_stream.recv().await {
-        match entry_result {
-            Ok(entry) => {
-                // Apply filters
-                if !filters.is_empty() && !filters.iter().all(|f| f.apply(&entry)) {
-                    continue;
-                }
-
-                // Display the log entry
-                if let Err(e) = formatter.format_colored(&entry) {
-                    error!("Failed to format log entry: {}", e);
-                }
-            }
-            Err(e) => {
-                error!("Error receiving log entry: {}", e);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-// Run standard mode (no tail parameter)
-async fn run_standard(
+// Unified log running function, replacing the previous three functions
+async fn run_logs(
     client: KubeClient,
     pods: &[PodInfo],
     filters: &[Box<dyn Filter>],
     formatter: &mut LogFormatter,
     follow: bool,
+    tail: Option<usize>,
 ) -> Result<()> {
+    // Log mode information
+    match (follow, tail) {
+        (true, Some(count)) => {
+            info!(
+                "Displaying the last {} log entries and following new ones",
+                count
+            );
+        }
+        (false, Some(count)) => {
+            info!("Displaying the last {} log entries", count);
+        }
+        (true, None) => {
+            info!("Following logs in real-time");
+        }
+        (false, None) => {
+            info!("Displaying all available logs");
+        }
+    }
+
     // Create log aggregator
     let mut aggregator = LogAggregator::new();
 
-    // Add pod log streams to aggregator
+    // Prepare to get log streams in parallel
+    let mut handles = Vec::with_capacity(pods.len());
+    
+    // Get log streams for each pod in parallel
     for pod in pods {
-        debug!("Adding log stream for pod {} ({})", pod.name, pod.status);
-        let log_stream = client.get_pod_logs(pod, follow, None).await?;
-        aggregator.add_pod_stream(pod.clone(), log_stream).await?;
+        let client_clone = client.clone();
+        let pod_clone = pod.clone();
+        let follow_clone = follow;
+        let tail_clone = tail;
+        
+        debug!("Starting log stream task for pod {} ({})", pod.name, pod.status);
+        
+        // Create an asynchronous task for each pod
+        let handle = tokio::spawn(async move {
+            let result = client_clone.get_pod_logs(&pod_clone, follow_clone, tail_clone).await;
+            (pod_clone, result)
+        });
+        
+        handles.push(handle);
     }
 
-    // Get log stream
-    let mut log_stream = aggregator.stream();
-
-    // Process and display logs
-    while let Some(entry_result) = log_stream.recv().await {
-        match entry_result {
-            Ok(entry) => {
-                // Apply filters
-                if !filters.is_empty() && !filters.iter().all(|f| f.apply(&entry)) {
-                    continue;
-                }
-
-                // Display log
-                if let Err(e) = formatter.format_colored(&entry) {
-                    error!("Failed to format log entry: {}", e);
+    // Wait for all log streams to initialize and add them to the aggregator
+    for handle in handles {
+        match handle.await {
+            Ok((pod, log_stream_result)) => {
+                match log_stream_result {
+                    Ok(log_stream) => {
+                        debug!("Adding log stream for pod {} ({})", pod.name, pod.status);
+                        if let Err(e) = aggregator.add_pod_stream(pod, log_stream).await {
+                            error!("Failed to add pod stream: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to get logs for pod {}: {}", pod.name, e);
+                    }
                 }
             }
             Err(e) => {
-                error!("Error receiving log entry: {}", e);
+                error!("Task failed: {}", e);
+            }
+        }
+    }
+
+    // Get the log stream
+    let mut log_stream = aggregator.stream();
+
+    if !follow && tail.is_some() {
+        let tail_count = tail.unwrap();
+        let mut pod_buffers: HashMap<String, Vec<LogEntry>> = HashMap::new();
+
+        for pod in pods {
+            pod_buffers.insert(pod.name.clone(), Vec::with_capacity(tail_count));
+        }
+
+        // Buffer logs for each pod
+        while let Some(entry_result) = log_stream.recv().await {
+            match entry_result {
+                Ok(entry) => {
+                    // Apply filters
+                    if !filters.is_empty() && !filters.iter().all(|f| f.apply(&entry)) {
+                        continue;
+                    }
+
+                    // Add to the appropriate pod buffer
+                    if let Some(buffer) = pod_buffers.get_mut(&entry.pod_name) {
+                        buffer.push(entry);
+                    }
+                }
+                Err(e) => {
+                    error!("Error receiving log entry: {}", e);
+                }
+            }
+        }
+
+        // Display the buffered logs for each pod
+        for (pod_name, buffer) in pod_buffers {
+            if !buffer.is_empty() {
+                info!("Logs for pod {}:", pod_name);
+
+                // If we have more logs than tail_count, only show the last tail_count logs
+                let logs_to_display = if buffer.len() > tail_count {
+                    &buffer[buffer.len() - tail_count..]
+                } else {
+                    &buffer[..]
+                };
+
+                for entry in logs_to_display {
+                    if let Err(e) = formatter.format_colored(entry) {
+                        error!("Failed to format log entry: {}", e);
+                    }
+                }
+            }
+        }
+    } else {
+        // Display logs in real-time
+        while let Some(entry_result) = log_stream.recv().await {
+            match entry_result {
+                Ok(entry) => {
+                    // Apply filters
+                    if !filters.is_empty() && !filters.iter().all(|f| f.apply(&entry)) {
+                        continue;
+                    }
+
+                    // Display the log entry
+                    if let Err(e) = formatter.format_colored(&entry) {
+                        error!("Failed to format log entry: {}", e);
+                    }
+                }
+                Err(e) => {
+                    error!("Error receiving log entry: {}", e);
+                }
             }
         }
     }
