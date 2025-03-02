@@ -26,11 +26,20 @@ impl LogEntry {
         // Clean the line
         let clean_line = raw_line.replace('\r', "").replace('\0', "");
 
-        // If we can't parse timestamp, return the whole line as message
+        // Try to extract the message without timestamp
+        // Kubernetes log timestamp format is typically: YYYY-MM-DDTHH:MM:SS.sssssssssZ
+        let message = if let Some(timestamp_end) = clean_line.find(" ") {
+            // If we find a space after the timestamp, extract everything after it
+            clean_line[timestamp_end + 1..].to_string()
+        } else {
+            // If we can't find a timestamp pattern, use the whole line
+            clean_line.clone()
+        };
+
         Self {
             pod_name,
-            raw_line: clean_line.clone(),
-            message: clean_line,
+            raw_line: clean_line,
+            message,
         }
     }
 }

@@ -34,11 +34,6 @@ impl PrefixFormat {
             &entry.pod_name[..std::cmp::min(8, entry.pod_name.len())],
         );
 
-        // Replace %t with timestamp placeholder for tests
-        if self.format.contains("%t") && cfg!(test) {
-            result = result.replace("%t", "%t");
-        }
-
         result
     }
 }
@@ -200,7 +195,7 @@ mod tests {
     fn create_test_entry() -> LogEntry {
         LogEntry {
             pod_name: "test-pod".to_string(),
-            raw_line: "2023-05-01T12:34:56Z Hello, world!".to_string(),
+            raw_line: "Hello, world!".to_string(),
             message: "Hello, world!".to_string(),
         }
     }
